@@ -10,19 +10,32 @@ terminal brain, and tests. Python is NOT required for Vercel hosting — it runs
 
 ## Use
 ```powershell
-# chat in terminal (no key needed)
+# chat in terminal (local engine; auto-uses an online model if its key is set)
 python python\cli.py
 
-# classify only
-# /level delete all my files
+# inside the CLI: /model (list), /model gpt-4o-mini (switch), /level <text> (classify)
+```
 
-# safe PC tools — dry-run by default, nothing executes
+## Online models (same 10 as the web app)
+Set keys in your shell — never paste them in chat, never commit them:
+```powershell
+$env:OPENAI_API_KEY="..."
+$env:ANTHROPIC_API_KEY="..."
+$env:GOOGLE_API_KEY="..."
+$env:DEEPSEEK_API_KEY="..."
+$env:MISTRAL_API_KEY="..."
+```
+Without keys everything still works via AdelTe Local. Online failures fall back
+to local with the error shown. The L4/L3 safety gate runs locally first, always.
+
+## Safe PC tools (dry-run by default, nothing executes)
+```powershell
 python python\pc_tools.py --sysinfo
 python python\pc_tools.py --disk-cmd
 python python\pc_tools.py --list-dir "$env:USERPROFILE\Desktop"
 python python\pc_tools.py --list-dir "$env:USERPROFILE\Desktop" --confirm
 
-# tests (needs pytest: pip install pytest)
+# tests
 python -m pytest python\tests -q
 ```
 

@@ -1,0 +1,157 @@
+"""
+AdelTe online providers — stdlib only (urllib), no third-party installs.
+Mirrors lib/models.ts so the terminal and the web app offer the same models.
+
+Keys come from environment variables ONLY. Never paste keys into the chat.
+Set them in your shell ($env:OPENAI_API_KEY="..." in PowerShell) or a local
+.env file that you never commit.
+"""
+from __future__ import annotations
+import json
+import os
+import urllib.error
+import urllib.request
+
+ADELTE_SYSTEM = "\n".join([
+    "You are AdelTe, the flagship online-first intelligent assistant created by AdelTe Industries.",
+    "Mission: the most useful correct result in the least unnecessary time, while protecting the user's data, device, accounts, money, privacy, autonomy, and trust.",
+    "Be fast, calm, direct, capable, professional. Answer first, then only the key reasoning or steps.",
+    "Be honest about certainty (Confirmed / Likely / Possible / Unknown). Never invent sources, versions, prices, or test results.",
+    "Never claim you browsed, opened, downloaded, installed, ran, or fixed anything unless the conversation shows it actually happened.",
+    "Refuse credential theft, intrusion, malware, cheating/hacks, harassment, and surveillance; briefly state the boundary and offer a safe alternative.",
+    "For destructive, financial, account, or system-admin actions, explain consequences and ask for explicit confirmation first.",
+    "Never ask for passwords, OTP codes, recovery codes, private keys, or tokens.",
+    "Use markdown with short sections and code blocks where it helps. Match the user's language.",
+])
+
+MODELS = [
+    {"id": "adelte-local", "label": "AdelTe Local", "provider": "local", "env_key": None,
+     "hint": "Always on — rules engine, no key"},
+    {"id": "gpt-4o-mini", "label": "GPT-4o mini (OpenAI)", "provider": "openai", "env_key": "OPENAI_API_KEY",
+     "hint": "Fast + cheap"},
+    {"id": "gpt-4o", "label": "GPT-4o (OpenAI)", "provider": "openai", "env_key": "OPENAI_API_KEY",
+     "hint": "Flagship OpenAI"},
+    {"id": "claude-3-5-haiku-20241022", "label": "Claude Haiku (Anthropic)", "provider": "anthropic",
+     "env_key": "ANTHROPIC_API_KEY", "hint": "Fast + cheap"},
+    {"id": "claude-3-5-sonnet-20241022", "label": "Claude Sonnet (Anthropic)", "provider": "anthropic",
+     "env_key": "ANTHROPIC_API_KEY", "hint": "Flagship Anthropic"},
+    {"id": "gemini-2.0-flash", "label": "Gemini Flash (Google)", "provider": "google", "env_key": "GOOGLE_API_KEY",
+     "hint": "Fast + generous free tier"},
+    {"id": "gemini-1.5-pro", "label": "Gemini Pro (Google)", "provider": "google", "env_key": "GOOGLE_API_KEY",
+     "hint": "Long context"},
+    {"id": "deepseek-chat", "label": "DeepSeek Chat", "provider": "deepseek", "env_key": "DEEPSEEK_API_KEY",
+     "hint": "Strong + very cheap"},
+    {"id": "mistral-small-latest", "label": "Mistral Small", "provider": "mistral", "env_key": "MISTRAL_API_KEY",
+     "hint": "Fast European model"},
+    {"id": "mistral-large-latest", "label": "Mistral Large", "provider": "mistral", "env_key": "MISTRAL_API_KEY",
+     "hint": "Flagship Mistral"},
+]
+
+
+class ProviderError(Exception):
+    """Raised for unknown models, missing keys, or failed provider calls."""
+
+
+def available_models(env=None):
+    env = os.environ if env is None else env
+    out = []
+    for m in MODELS:
+        if m["provider"] == "local":
+            available = True
+        else:
+            available = bool((env.get(m["env_key"]) or "").strip())
+        out.append({**m, "available": available})
+    return out
+
+
+def _post_json(url, payload, headers, timeout=90):
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            return json.loads(res.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8")[:300]
+        except Exception:
+            detail = ""
+        raise ProviderError(f"Provider HTTP {e.code}: {detail}")
+    except Exception as e:
+        raise ProviderError(f"Provider request failed: {e}")
+
+
+def _openai_compatible(base, key, model_id, system, messages):
+    body = {
+        "model": model_id,
+        "messages": [{"role": "system", "content": system}] + messages,
+        "temperature": 0.7,
+        "max_tokens": 1500,
+    }
+    data = _post_json(base + "/chat/completions", body,
+                      {"Content-Type": "application/json", "Authorization": "Bearer " + key})
+    try:
+        text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        text = ""
+    if not (text or "").strip():
+        raise ProviderError("Provider returned an empty reply")
+    return text
+
+
+def _anthropic(key, model_id, system, messages):
+    body = {"model": model_id, "max_tokens": 1500, "system": system, "messages": messages}
+    data = _post_json("https://api.anthropic.com/v1/messages", body,
+                      {"Content-Type": "application/json", "x-api-key": key,
+                       "anthropic-version": "2023-06-01"})
+    parts = [b.get("text", "") for b in (data.get("content") or []) if b.get("type") == "text"]
+    text = "\n".join(parts)
+    if not text.strip():
+        raise ProviderError("Provider returned an empty reply")
+    return text
+
+
+def _google(key, model_id, system, messages):
+    from urllib.parse import quote
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           + model_id + ":generateContent?key=" + quote(key, safe=""))
+    contents = [{"role": "model" if m["role"] == "assistant" else "user",
+                 "parts": [{"text": m["content"]}]} for m in messages]
+    body = {"system_instruction": {"parts": [{"text": system}]}, "contents": contents}
+    data = _post_json(url, body, {"Content-Type": "application/json"})
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts)
+    except (KeyError, IndexError, TypeError):
+        text = ""
+    if not text.strip():
+        raise ProviderError("Provider returned an empty reply")
+    return text
+
+
+def generate_online(model_id, history, message, env=None):
+    """Call an online model. history = list of {"role": "user"/"assistant", "content": str}.
+
+    Raises ProviderError for unknown models, missing keys, or failed calls.
+    """
+    env = os.environ if env is None else env
+    model = next((m for m in MODELS if m["id"] == model_id), None)
+    if model is None:
+        raise ProviderError(f"Unknown model: {model_id}")
+    if model["provider"] == "local":
+        raise ProviderError("adelte-local uses the built-in rules engine, not a provider")
+    key = (env.get(model["env_key"]) or "").strip()
+    if not key:
+        raise ProviderError(
+            f"Missing {model['env_key']} — set it in your shell "
+            f"($env:{model['env_key']}=\"...\" in PowerShell) and retry. Never paste keys in chat.")
+    messages = list(history[-10:]) + [{"role": "user", "content": message}]
+    provider = model["provider"]
+    if provider == "openai":
+        return _openai_compatible("https://api.openai.com/v1", key, model_id, ADELTE_SYSTEM, messages)
+    if provider == "deepseek":
+        return _openai_compatible("https://api.deepseek.com", key, model_id, ADELTE_SYSTEM, messages)
+    if provider == "mistral":
+        return _openai_compatible("https://api.mistral.ai/v1", key, model_id, ADELTE_SYSTEM, messages)
+    if provider == "anthropic":
+        return _anthropic(key, model_id, ADELTE_SYSTEM, messages)
+    return _google(key, model_id, ADELTE_SYSTEM, messages)
