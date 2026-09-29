@@ -30,24 +30,50 @@ const QUICK = [
   "My PC is slow — safe cleanup?"
 ];
 
-export default function Home() {
-  const [msgs, setMsgs] = useState<Msg[]>([
-    {
-      role: "ai",
-      text: "I'm AdelTe by AdelTe Industries — Search intelligently. Analyze carefully. Act safely.\n\nPick a model above. Anything marked OFFLINE needs its API key in the server environment — until then I answer with the built-in local engine.",
-      level: 0,
-      levelLabel: "Level 0 — Information & drafting",
-      confidence: "High",
-      model: "AdelTe Local"
+const GREETING: Msg = {
+  role: "ai",
+  text: "I'm AdelTe by AdelTe Industries — Search intelligently. Analyze carefully. Act safely.\n\nPick a model above. Anything marked OFFLINE needs its API key in the server environment — until then I answer with the built-in local engine.",
+  level: 0,
+  levelLabel: "Level 0 — Information & drafting",
+  confidence: "High",
+  model: "AdelTe Local"
+};
+
+function loadMsgs(): Msg[] {
+  try {
+    const raw = localStorage.getItem("adelte-msgs");
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr) && arr.length > 0) return arr.slice(-50);
     }
-  ]);
+  } catch {}
+  return [GREETING];
+}
+
+export default function Home() {
+  const [msgs, setMsgs] = useState<Msg[]>(() => (typeof window === "undefined" ? [GREETING] : loadMsgs()));
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [models, setModels] = useState<ModelStatus[]>([{ id: "adelte-local", label: "AdelTe Local", provider: "local", hint: "", available: true }]);
-  const [modelId, setModelId] = useState("adelte-local");
+  const [modelId, setModelId] = useState<string>(() =>
+    typeof window === "undefined" ? "adelte-local" : localStorage.getItem("adelte-model") || "adelte-local"
+  );
   const boxRef = useRef<HTMLDivElement>(null);
   const msgsRef = useRef<Msg[]>(msgs);
   msgsRef.current = msgs;
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("adelte-msgs", JSON.stringify(msgs.slice(-50)));
+    } catch {}
+  }, [msgs]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("adelte-model", modelId);
+    } catch {}
+  }, [modelId]);
 
   useEffect(() => {
     fetch("/api/chat")
@@ -55,8 +81,11 @@ export default function Home() {
       .then((d) => {
         if (Array.isArray(d.models) && d.models.length > 0) {
           setModels(d.models);
-          const firstOnline = d.models.find((m: ModelStatus) => m.available && m.id !== "adelte-local");
-          if (firstOnline) setModelId(firstOnline.id);
+          setModelId((prev) => {
+            if (d.models.some((m: ModelStatus) => m.id === prev)) return prev;
+            const firstOnline = d.models.find((m: ModelStatus) => m.available && m.id !== "adelte-local");
+            return firstOnline ? firstOnline.id : prev;
+          });
         }
       })
       .catch(() => {});
@@ -76,11 +105,14 @@ export default function Home() {
     setBusy(true);
     const aiIndex = msgsRef.current.length + 1;
     setMsgs((m) => [...m, { role: "ai", text: "" }]);
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
       const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, history, modelId })
+        body: JSON.stringify({ message, history, modelId }),
+        signal: ac.signal
       });
       if (!res.ok || !res.body) throw new Error("stream failed");
       const reader = res.body.getReader();
@@ -132,9 +164,14 @@ export default function Home() {
         }
         if (rDone) break;
       }
-    } catch {
-      setMsgs((m) => [...m, { role: "ai", text: "Request failed. Check your connection and retry.", level: 0, levelLabel: "Error" }]);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        setMsgs((m) => m.map((mm, i) => (i === aiIndex ? { ...mm, text: (mm.text || "No reply.") + "\n\n[Stopped by user.]" } : mm)));
+      } else {
+        setMsgs((m) => [...m.slice(0, aiIndex), ...m.slice(aiIndex + 1), { role: "ai", text: "Request failed. Check your connection and retry.", level: 0, levelLabel: "Error" }]);
+      }
     } finally {
+      abortRef.current = null;
       setBusy(false);
       requestAnimationFrame(() => boxRef.current?.scrollTo({ top: 999999, behavior: "smooth" }));
     }
@@ -190,7 +227,19 @@ export default function Home() {
         </aside>
 
         <main className="card chat">
-          <h3>Chat</h3>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <h3 style={{ margin: 0 }}>Chat</h3>
+            <button
+              className="chip"
+              disabled={busy}
+              onClick={() => {
+                abortRef.current?.abort();
+                setMsgs([GREETING]);
+              }}
+            >
+              Clear chat
+            </button>
+          </div>
           <div className="msgs" ref={boxRef}>
             {msgs.map((m, i) => (
               <div key={i} className={m.role === "user" ? "msg user" : "msg ai"}>
@@ -224,6 +273,11 @@ export default function Home() {
             <button className="btn" disabled={busy || !input.trim()} onClick={() => send()}>
               Send
             </button>
+            {busy && (
+              <button className="btn" onClick={() => abortRef.current?.abort()} style={{ background: "linear-gradient(135deg,#f87171,#fbbf24)" }}>
+                Stop
+              </button>
+            )}
           </div>
 
           <div className="foot">

@@ -84,7 +84,7 @@ export async function GET() {
   return NextResponse.json({
     name: "AdelTe",
     org: "AdelTe Industries",
-    version: "1.1.0",
+    version: "1.3.0",
     models: getAvailableModels()
   });
 }
