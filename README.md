@@ -7,10 +7,11 @@ Operating promise: **Search intelligently. Analyze carefully. Act safely. Explai
 Spec: see `AdelTe.md` (sections 1–20).
 
 ## Features
-- Chat UI with L0–L4 safety badges, playbook tags, confidence
-- Local AdelTe engine (`lib/adelte.ts`): classification, boundaries, playbooks
-- `/api/chat` route — works on Vercel with zero env vars
-- Responsive dark UI, quick prompts, no secret handling
+- 10 models: AdelTe Local + GPT-4o / GPT-4o mini, Claude Sonnet / Haiku, Gemini Pro / Flash, DeepSeek Chat, Mistral Small / Large
+- Model picker with live online/offline status (`GET /api/chat`)
+- Local safety gate on every request: L4 refused locally, L3 flagged, even for online models
+- Online failures fall back to the local engine with the error shown
+- Responsive dark UI, quick prompts, no secret handling (keys via env only)
 
 ## Run locally
 ```powershell
@@ -39,6 +40,17 @@ git push -u origin main
 Use a Personal Access Token as password when prompted. Never paste tokens in chat.
 
 If the repo already exists with another name, replace `pccontroller` with that name.
+
+## Go online (real models)
+Without keys the app answers with the built-in local engine. To unlock online models:
+
+Locally: copy `.env.example` to `.env.local`, fill keys, restart `npm run dev`.
+
+On Vercel: Project → Settings → Environment Variables → add any of:
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`
+→ Deployments → Redeploy. The picker shows ● online for configured models.
+
+Get keys from: platform.openai.com, console.anthropic.com, aistudio.google.com, platform.deepseek.com, console.mistral.ai. Never paste keys in chat.
 
 ## Host on Vercel
 1. Go to vercel.com → Add New → Project → Import your GitHub repo.

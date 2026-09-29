@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Msg = {
   role: "user" | "ai";
@@ -9,6 +9,16 @@ type Msg = {
   level?: number;
   playbook?: string | null;
   confidence?: string;
+  model?: string;
+  onlineError?: string;
+};
+
+type ModelStatus = {
+  id: string;
+  label: string;
+  provider: string;
+  hint: string;
+  available: boolean;
 };
 
 const QUICK = [
@@ -24,38 +34,63 @@ export default function Home() {
   const [msgs, setMsgs] = useState<Msg[]>([
     {
       role: "ai",
-      text: "I'm AdelTe by AdelTe Industries — Search intelligently. Analyze carefully. Act safely.\n\nTell me your goal in one sentence. I classify every task L0–L4 and ask before anything destructive.",
+      text: "I'm AdelTe by AdelTe Industries — Search intelligently. Analyze carefully. Act safely.\n\nPick a model above. Anything marked OFFLINE needs its API key in the server environment — until then I answer with the built-in local engine.",
       level: 0,
       levelLabel: "Level 0 — Information & drafting",
-      confidence: "High"
+      confidence: "High",
+      model: "AdelTe Local"
     }
   ]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [models, setModels] = useState<ModelStatus[]>([{ id: "adelte-local", label: "AdelTe Local", provider: "local", hint: "", available: true }]);
+  const [modelId, setModelId] = useState("adelte-local");
   const boxRef = useRef<HTMLDivElement>(null);
+  const msgsRef = useRef<Msg[]>(msgs);
+  msgsRef.current = msgs;
+
+  useEffect(() => {
+    fetch("/api/chat")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d.models) && d.models.length > 0) {
+          setModels(d.models);
+          const firstOnline = d.models.find((m: ModelStatus) => m.available && m.id !== "adelte-local");
+          if (firstOnline) setModelId(firstOnline.id);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const onlineCount = models.filter((m) => m.available && m.id !== "adelte-local").length;
 
   async function send(text?: string) {
     const message = (text ?? input).trim();
     if (!message || busy) return;
     setInput("");
+    const history = [...msgsRef.current, { role: "user" as const, text: message }]
+      .filter((m) => m.role === "user" || m.role === "ai")
+      .slice(-10)
+      .map((m) => ({ role: m.role, text: m.text }));
     setMsgs((m) => [...m, { role: "user", text: message }]);
     setBusy(true);
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message })
+        body: JSON.stringify({ message, history, modelId })
       });
       const data = await res.json();
       setMsgs((m) => [
         ...m,
         {
           role: "ai",
-          text: data.reply ?? "No reply.",
+          text: (data.reply ?? data.error ?? "No reply.") + (data.onlineError ? "\n\n[Online model failed: " + data.onlineError + " — answered with local engine.]" : ""),
           level: data.level,
           levelLabel: data.levelLabel,
           playbook: data.playbook,
-          confidence: data.confidence
+          confidence: data.confidence,
+          model: data.model
         }
       ]);
     } catch {
@@ -76,12 +111,27 @@ export default function Home() {
             <p>by AdelTe Industries · online-first assistant · Vercel-ready</p>
           </div>
         </div>
-        <div className="pill">Local mode · no API key needed · L0–L4 safety</div>
+        <div className="pill">{onlineCount > 0 ? `${onlineCount} model${onlineCount > 1 ? "s" : ""} online` : "Local mode"} · L0–L4 safety</div>
       </div>
 
       <div className="grid">
         <aside className="card">
-          <h3>Capabilities</h3>
+          <h3>Model</h3>
+          <select className="input" value={modelId} onChange={(e) => setModelId(e.target.value)} style={{ width: "100%" }}>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.available ? "● " : "○ "}{m.label}{m.available ? "" : " (needs key)"}
+              </option>
+            ))}
+          </select>
+          <div className="cap" style={{ marginTop: 8 }}>
+            <span className="dot" style={{ background: onlineCount > 0 ? "#34d399" : "#fbbf24" }} />
+            {onlineCount > 0
+              ? "Online models answer directly; the L4/L3 safety gate still runs first."
+              : "No API keys on the server — local engine answers. Add keys (see README) to go online."}
+          </div>
+
+          <h3 style={{ marginTop: 18 }}>Capabilities</h3>
           <div className="cap"><span className="dot" style={{ background: "#34d399" }} />Think, research, summarize &amp; compare sources</div>
           <div className="cap"><span className="dot" style={{ background: "#22d3ee" }} />Write, review, explain &amp; fix code</div>
           <div className="cap"><span className="dot" style={{ background: "#5b8cff" }} />PC help via safe local commands</div>
@@ -111,6 +161,7 @@ export default function Home() {
                     <span className={`tag l${m.level ?? 0}`}>{m.levelLabel}</span>
                     {m.playbook ? <span className="tag">{m.playbook}</span> : null}
                     {m.confidence ? <span className="tag">Confidence: {m.confidence}</span> : null}
+                    {m.model ? <span className="tag">{m.model}</span> : null}
                   </div>
                 )}
               </div>
