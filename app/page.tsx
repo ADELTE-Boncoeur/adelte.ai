@@ -74,25 +74,64 @@ export default function Home() {
       .map((m) => ({ role: m.role, text: m.text }));
     setMsgs((m) => [...m, { role: "user", text: message }]);
     setBusy(true);
+    const aiIndex = msgsRef.current.length + 1;
+    setMsgs((m) => [...m, { role: "ai", text: "" }]);
     try {
-      const res = await fetch("/api/chat", {
+      const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message, history, modelId })
       });
-      const data = await res.json();
-      setMsgs((m) => [
-        ...m,
-        {
-          role: "ai",
-          text: (data.reply ?? data.error ?? "No reply.") + (data.onlineError ? "\n\n[Online model failed: " + data.onlineError + " — answered with local engine.]" : ""),
-          level: data.level,
-          levelLabel: data.levelLabel,
-          playbook: data.playbook,
-          confidence: data.confidence,
-          model: data.model
+      if (!res.ok || !res.body) throw new Error("stream failed");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let done = false;
+      while (!done) {
+        const { done: rDone, value } = await reader.read();
+        if (value) buf += decoder.decode(value, { stream: !rDone });
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          let evt: Record<string, unknown>;
+          try {
+            evt = JSON.parse(line.slice(5));
+          } catch {
+            continue;
+          }
+          if (typeof evt.token === "string") {
+            const tok = evt.token as string;
+            setMsgs((m) => m.map((mm, i) => (i === aiIndex ? { ...mm, text: mm.text + tok } : mm)));
+            boxRef.current?.scrollTo({ top: 999999 });
+          }
+          if (typeof evt.error === "string") {
+            setMsgs((m) => m.map((mm, i) => (i === aiIndex ? { ...mm, text: String(evt.error), levelLabel: "Error" } : mm)));
+          }
+          if (evt.done) {
+            const onlineError = typeof evt.onlineError === "string" ? "\n\n[Online model failed: " + evt.onlineError + " — answered with local engine.]" : "";
+            setMsgs((m) =>
+              m.map((mm, i) =>
+                i === aiIndex
+                  ? {
+                      ...mm,
+                      text: (mm.text || "No reply.") + onlineError,
+                      level: evt.level as number,
+                      levelLabel: evt.levelLabel as string,
+                      playbook: (evt.playbook as string | null) ?? null,
+                      confidence: evt.confidence as string,
+                      model: evt.model as string
+                    }
+                  : mm
+              )
+            );
+            done = true;
+            break;
+          }
         }
-      ]);
+        if (rDone) break;
+      }
     } catch {
       setMsgs((m) => [...m, { role: "ai", text: "Request failed. Check your connection and retry.", level: 0, levelLabel: "Error" }]);
     } finally {
