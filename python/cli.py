@@ -1,7 +1,7 @@
 """AdelTe local CLI — terminal companion (local engine + online models, no key needed to start)."""
 import sys
 from adelte_brain import classify_task, generate_reply
-from providers import ProviderError, available_models, generate_online
+from providers import ProviderError, available_models, generate_online_stream
 
 BANNER = """AdelTe (local Python) — by AdelTe Industries
 Type your goal. Commands:
@@ -74,9 +74,15 @@ def main() -> int:
             print(r["answer"] + "\n")
         else:
             try:
-                text = generate_online(model_id, history, user_in)
                 print(f"AdelTe [{task.label}] | {model_id}")
-                print(text + "\n")
+                parts = []
+                for tok in generate_online_stream(model_id, history, user_in):
+                    print(tok, end="", flush=True)
+                    parts.append(tok)
+                print("\n")
+                text = "".join(parts)
+                if not text.strip():
+                    raise ProviderError("Provider returned an empty reply")
                 history = (history + [{"role": "user", "content": user_in},
                                       {"role": "assistant", "content": text}])[-10:]
                 continue

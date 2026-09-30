@@ -155,3 +155,145 @@ def generate_online(model_id, history, message, env=None):
     if provider == "anthropic":
         return _anthropic(key, model_id, ADELTE_SYSTEM, messages)
     return _google(key, model_id, ADELTE_SYSTEM, messages)
+
+
+# ---- Streaming (SSE) ----
+
+def extract_openai(data):
+    """Pure: OpenAI-compatible delta chunk -> text or None."""
+    try:
+        delta = data["choices"][0].get("delta") or {}
+        text = delta.get("content")
+        if isinstance(text, str):
+            return text
+        msg = data["choices"][0].get("message") or {}
+        text = msg.get("content")
+        return text if isinstance(text, str) else None
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+
+
+def extract_anthropic(event, data):
+    """Pure: only content_block_delta carries text."""
+    if event != "content_block_delta":
+        return None
+    try:
+        text = data["delta"].get("text")
+        return text if isinstance(text, str) else None
+    except (KeyError, TypeError, AttributeError):
+        return None
+
+
+def extract_google(data):
+    """Pure: candidates[0].content.parts[].text joined."""
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts)
+        return text or None
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+
+
+def _stream_sse(url, payload, headers, extract, timeout=90):
+    """Yield text tokens from an SSE response. Raises ProviderError on failure."""
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        res = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8")[:300]
+        except Exception:
+            detail = ""
+        raise ProviderError(f"Provider HTTP {e.code}: {detail}")
+    except Exception as e:
+        raise ProviderError(f"Provider request failed: {e}")
+    buf = ""
+    event = ""
+    with res:
+        while True:
+            try:
+                chunk = res.read(4096)
+            except Exception as e:
+                raise ProviderError(f"Provider stream interrupted: {e}")
+            if chunk:
+                buf += chunk.decode("utf-8", errors="replace")
+            lines = buf.split("\n")
+            buf = lines.pop()
+            for line in lines:
+                line = line.rstrip("\r")
+                if line == "":
+                    event = ""
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("event:"):
+                    event = line[6:].strip()
+                    if event in ("message_stop", "error", "message_complete"):
+                        return
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                payload_s = line[5:].strip()
+                if payload_s == "[DONE]":
+                    return
+                try:
+                    obj = json.loads(payload_s)
+                except ValueError:
+                    continue
+                token = extract(event, obj)
+                if token:
+                    yield token
+            if not chunk:
+                break
+
+
+def generate_online_stream(model_id, history, message, env=None):
+    """Yield reply tokens from an online model.
+
+    Same validation as generate_online: unknown models raise immediately;
+    local models and missing keys raise ProviderError on first iteration.
+    history = list of {"role": "user"/"assistant", "content": str}.
+    """
+    env = os.environ if env is None else env
+    model = next((m for m in MODELS if m["id"] == model_id), None)
+    if model is None:
+        raise ProviderError(f"Unknown model: {model_id}")
+    return _generate_online_stream_validated(model, history, message, env)
+
+
+def _generate_online_stream_validated(model, history, message, env):
+    if model["provider"] == "local":
+        raise ProviderError("adelte-local uses the built-in rules engine, not a provider")
+    key = (env.get(model["env_key"]) or "").strip()
+    if not key:
+        raise ProviderError(
+            f"Missing {model['env_key']} — set it in your shell "
+            f"($env:{model['env_key']}=\"...\" in PowerShell) and retry. Never paste keys in chat.")
+    messages = list(history[-10:]) + [{"role": "user", "content": message}]
+    provider = model["provider"]
+    if provider in ("openai", "deepseek", "mistral"):
+        base = {"openai": "https://api.openai.com/v1",
+                "deepseek": "https://api.deepseek.com",
+                "mistral": "https://api.mistral.ai/v1"}[provider]
+        body = {"model": model["id"],
+                "messages": [{"role": "system", "content": ADELTE_SYSTEM}] + messages,
+                "temperature": 0.7, "max_tokens": 1500, "stream": True}
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + key}
+        yield from _stream_sse(base + "/chat/completions", body, headers, lambda _e, d: extract_openai(d))
+        return
+    if provider == "anthropic":
+        body = {"model": model["id"], "max_tokens": 1500, "system": ADELTE_SYSTEM,
+                "messages": messages, "stream": True}
+        headers = {"Content-Type": "application/json", "x-api-key": key,
+                   "anthropic-version": "2023-06-01", "Accept": "text/event-stream"}
+        yield from _stream_sse("https://api.anthropic.com/v1/messages", body, headers, extract_anthropic)
+        return
+    from urllib.parse import quote
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           + model["id"] + ":generateContent?key=" + quote(key, safe="") + "&alt=sse")
+    contents = [{"role": "model" if m["role"] == "assistant" else "user",
+                 "parts": [{"text": m["content"]}]} for m in messages]
+    body = {"system_instruction": {"parts": [{"text": ADELTE_SYSTEM}]}, "contents": contents}
+    yield from _stream_sse(url, body, {"Content-Type": "application/json"},
+                           lambda _e, d: extract_google(d))
