@@ -3,7 +3,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 from providers import MODELS, ProviderError, available_models, generate_online
-from providers import extract_anthropic, extract_google, extract_openai, generate_online_stream
+from providers import attachment_label, build_context_message, extract_anthropic, extract_google
+from providers import extract_openai, generate_online_stream, local_file_note, sanitize_files
 
 
 def test_catalog_has_all_providers():
@@ -72,3 +73,31 @@ def test_stream_local_rejected_on_iteration():
     gen = generate_online_stream("adelte-local", [], "hi", env={})
     with pytest.raises(ProviderError, match="rules engine"):
         list(gen)
+
+
+def test_sanitize_files_basic():
+    files, notes = sanitize_files([{"name": "a.py", "text": "print(1)"}])
+    assert len(files) == 1 and notes == []
+
+
+def test_sanitize_files_skips_blank_and_limits():
+    from providers import MAX_FILES, MAX_CHARS_PER_FILE
+    files, _ = sanitize_files([{"name": "x", "text": "   "}, {"name": "b.log", "text": "ok"}])
+    assert [f["name"] for f in files] == ["b.log"]
+    files, notes = sanitize_files([{"name": "big.txt", "text": "x" * (MAX_CHARS_PER_FILE + 50)}])
+    assert len(files[0]["text"]) == MAX_CHARS_PER_FILE
+    assert any("truncated" in n for n in notes)
+    many = [{"name": f"f{i}.txt", "text": "data"} for i in range(MAX_FILES + 2)]
+    files, notes = sanitize_files(many)
+    assert len(files) == MAX_FILES
+    assert any("first" in n for n in notes)
+
+
+def test_build_context_message():
+    ctx = build_context_message("fix this", [{"name": "a.py", "text": "print(1)"}])
+    assert ctx.startswith("fix this") and '<file name="a.py">' in ctx
+    assert build_context_message("hi", []) == "hi"
+    assert attachment_label([]) == ""
+    assert attachment_label([{"name": "a.py", "text": ""}]) == " [attached: a.py]"
+    assert "a.py" in local_file_note([{"name": "a.py", "text": ""}])
+    assert local_file_note([]) == ""

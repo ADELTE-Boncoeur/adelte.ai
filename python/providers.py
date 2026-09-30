@@ -52,6 +52,68 @@ class ProviderError(Exception):
     """Raised for unknown models, missing keys, or failed provider calls."""
 
 
+MAX_FILES = 5
+MAX_CHARS_PER_FILE = 20000
+MAX_TOTAL_CHARS = 60000
+
+
+def _clean_name(name):
+    import re
+    cleaned = re.sub(r"[^\w.\-() ]", "_", name or "file")[:80]
+    return cleaned or "file"
+
+
+def sanitize_files(items):
+    """Normalize + enforce caps. Returns (files, notes)."""
+    notes = []
+    if not isinstance(items, list):
+        return [], notes
+    files = []
+    total = 0
+    for item in items:
+        if len(files) >= MAX_FILES:
+            notes.append(f"Only the first {MAX_FILES} files were kept.")
+            break
+        if not isinstance(item, dict):
+            continue
+        name = _clean_name(item.get("name") if isinstance(item.get("name"), str) else "file")
+        text = item.get("text") if isinstance(item.get("text"), str) else ""
+        if not text.strip():
+            continue
+        if len(text) > MAX_CHARS_PER_FILE:
+            text = text[:MAX_CHARS_PER_FILE]
+            notes.append(f"{name} was truncated to {MAX_CHARS_PER_FILE} chars.")
+        if total + len(text) > MAX_TOTAL_CHARS:
+            notes.append(f"Total attachment budget ({MAX_TOTAL_CHARS} chars) reached — remaining files skipped.")
+            break
+        total += len(text)
+        files.append({"name": name, "text": text})
+    return files, notes
+
+
+def build_context_message(message, files):
+    """User text + fenced file blocks for provider context."""
+    if not files:
+        return message
+    blocks = [f"<file name=\"{f['name']}\">\n{f['text']}\n</file>" for f in files]
+    return f"{message}\n\nAttached files for context:\n" + "\n".join(blocks)
+
+
+def attachment_label(files):
+    if not files:
+        return ""
+    return " [attached: " + ", ".join(f["name"] for f in files) + "]"
+
+
+def local_file_note(files):
+    if not files:
+        return ""
+    names = ", ".join(f["name"] for f in files)
+    return (f"\n\n[Note: {len(files)} file(s) attached ({names}). "
+            "The local engine can't deeply analyze file content — "
+            "switch to an online model for file-aware answers.]")
+
+
 def available_models(env=None):
     env = os.environ if env is None else env
     out = []
@@ -128,9 +190,10 @@ def _google(key, model_id, system, messages):
     return text
 
 
-def generate_online(model_id, history, message, env=None):
+def generate_online(model_id, history, message, env=None, files=None):
     """Call an online model. history = list of {"role": "user"/"assistant", "content": str}.
 
+    files = list of {"name": str, "text": str} sent as context blocks.
     Raises ProviderError for unknown models, missing keys, or failed calls.
     """
     env = os.environ if env is None else env
@@ -144,7 +207,8 @@ def generate_online(model_id, history, message, env=None):
         raise ProviderError(
             f"Missing {model['env_key']} — set it in your shell "
             f"($env:{model['env_key']}=\"...\" in PowerShell) and retry. Never paste keys in chat.")
-    messages = list(history[-10:]) + [{"role": "user", "content": message}]
+    content = build_context_message(message, files or [])
+    messages = list(history[-10:]) + [{"role": "user", "content": content}]
     provider = model["provider"]
     if provider == "openai":
         return _openai_compatible("https://api.openai.com/v1", key, model_id, ADELTE_SYSTEM, messages)
@@ -248,7 +312,7 @@ def _stream_sse(url, payload, headers, extract, timeout=90):
                 break
 
 
-def generate_online_stream(model_id, history, message, env=None):
+def generate_online_stream(model_id, history, message, env=None, files=None):
     """Yield reply tokens from an online model.
 
     Same validation as generate_online: unknown models raise immediately;
@@ -259,10 +323,10 @@ def generate_online_stream(model_id, history, message, env=None):
     model = next((m for m in MODELS if m["id"] == model_id), None)
     if model is None:
         raise ProviderError(f"Unknown model: {model_id}")
-    return _generate_online_stream_validated(model, history, message, env)
+    return _generate_online_stream_validated(model, history, message, env, files)
 
 
-def _generate_online_stream_validated(model, history, message, env):
+def _generate_online_stream_validated(model, history, message, env, files=None):
     if model["provider"] == "local":
         raise ProviderError("adelte-local uses the built-in rules engine, not a provider")
     key = (env.get(model["env_key"]) or "").strip()
@@ -270,7 +334,8 @@ def _generate_online_stream_validated(model, history, message, env):
         raise ProviderError(
             f"Missing {model['env_key']} — set it in your shell "
             f"($env:{model['env_key']}=\"...\" in PowerShell) and retry. Never paste keys in chat.")
-    messages = list(history[-10:]) + [{"role": "user", "content": message}]
+    content = build_context_message(message, files or [])
+    messages = list(history[-10:]) + [{"role": "user", "content": content}]
     provider = model["provider"]
     if provider in ("openai", "deepseek", "mistral"):
         base = {"openai": "https://api.openai.com/v1",
