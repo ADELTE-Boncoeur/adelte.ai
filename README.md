@@ -6,12 +6,20 @@ Operating promise: **Search intelligently. Analyze carefully. Act safely. Explai
 
 Spec: see `AdelTe.md` (sections 1–20).
 
-## Features
+## Features (web)
 - 10 models: AdelTe Local + GPT-4o / GPT-4o mini, Claude Sonnet / Haiku, Gemini Pro / Flash, DeepSeek Chat, Mistral Small / Large
 - Model picker with live online/offline status (`GET /api/chat`)
-- Local safety gate on every request: L4 refused locally, L3 flagged, even for online models
+- Streaming replies (SSE, `/api/chat/stream`) with Stop button
+- File attachments: picker + drag-drop, sent as context to online models (5 files / 20K chars each / 60K total)
+- Persistent chat + model choice (localStorage), Clear chat button
+- Local safety gate on every request: L4 refused locally, L3 flagged — classification runs on your message only, never on file content
 - Online failures fall back to the local engine with the error shown
-- Responsive dark UI, quick prompts, no secret handling (keys via env only)
+- Responsive dark UI, quick prompts, keys via env only (never in chat)
+
+## Features (terminal: `python/python/cli.py`)
+- Same 10 models + `/model` picker, streaming tokens, `/attach <path>` `/files` `/clear`
+- Same L0–L4 safety gate; safe PC tools (`pc_tools.py`, dry-run by default)
+- Stdlib only — no `pip install` needed except `pytest` for tests
 
 ## Run locally
 ```powershell
@@ -26,20 +34,16 @@ npm run build
 npm start
 ```
 
-## Push to GitHub (ADELTE-Boncoeur)
-1. Create an empty repo on GitHub, e.g. `pccontroller` (no README, no .gitignore).
-2. Then:
+## Push updates to GitHub
+The repo is live at https://github.com/ADELTE-Boncoeur/adelte.ai. After any change:
 ```powershell
-git init
-git add .
-git commit -m "AdelTe AI v1 — Vercel-ready Next.js app"
-git branch -M main
-git remote add origin https://github.com/ADELTE-Boncoeur/pccontroller.git
-git push -u origin main
+npm run build            # must pass
+python -m pytest python\tests -q   # must pass
+git add -A
+git commit -m "Describe the change"
+git push origin main
 ```
-Use a Personal Access Token as password when prompted. Never paste tokens in chat.
-
-If the repo already exists with another name, replace `pccontroller` with that name.
+Vercel redeploys automatically on every push to `main`. Never commit keys (`.env.local` is gitignored).
 
 ## Go online (real models)
 Without keys the app answers with the built-in local engine. To unlock online models:
@@ -53,22 +57,28 @@ On Vercel: Project → Settings → Environment Variables → add any of:
 Get keys from: platform.openai.com, console.anthropic.com, aistudio.google.com, platform.deepseek.com, console.mistral.ai. Never paste keys in chat.
 
 ## Host on Vercel
-1. Go to vercel.com → Add New → Project → Import your GitHub repo.
+1. Go to vercel.com → Add New → Project → Import `ADELTE-Boncoeur/adelte.ai`.
 2. Framework Preset: **Next.js**. Build Command: `npm run build`. Output: `.next`.
-3. No environment variables needed (local mode).
-4. Deploy → live at `https://<project>.vercel.app`.
-
-## Extend with a real model later
-- Add `OPENAI_API_KEY` in Vercel → Settings → Environment Variables.
-- Branch in `app/api/chat/route.ts`: if key exists, call provider; else fall back to `generateAdelTeReply`.
-- Keep L4 boundaries and confirmation gates even with a model.
+3. Environment Variables: add API keys (see "Go online" above) for online models, or skip for local-only mode.
+4. Deploy → live at `https://<project>.vercel.app`. Every push to `main` redeploys.
 
 ## Structure
 ```
 app/
   layout.tsx, page.tsx, globals.css
-  api/chat/route.ts
-lib/adelte.ts
-AdelTe.md
+  api/chat/route.ts          # JSON chat (models + local engine)
+  api/chat/stream/route.ts   # SSE streaming chat
+lib/
+  adelte.ts                  # local rules engine (L0-L4, playbooks)
+  models.ts                  # 10-model catalog + provider calls
+  streaming.ts               # SSE streaming clients
+  attachments.ts             # file caps + context blocks
+python/
+  cli.py                     # terminal chat (/model /attach /level)
+  adelte_brain.py            # local engine (mirrors lib/adelte.ts)
+  providers.py               # online models, stdlib only
+  pc_tools.py                # safe PC tools (dry-run by default)
+  tests/                     # pytest suite
+AdelTe.md                    # full product spec (sections 1-20)
 vercel.json
 ```
