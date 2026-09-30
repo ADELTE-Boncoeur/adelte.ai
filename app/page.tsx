@@ -21,6 +21,14 @@ type ModelStatus = {
   available: boolean;
 };
 
+type AttachedFile = {
+  name: string;
+  text: string;
+};
+
+const MAX_CLIENT_FILES = 5;
+const MAX_CLIENT_CHARS = 64000;
+
 const QUICK = [
   "Who are you?",
   "How do I host this on Vercel?",
@@ -62,6 +70,9 @@ export default function Home() {
   const msgsRef = useRef<Msg[]>(msgs);
   msgsRef.current = msgs;
   const abortRef = useRef<AbortController | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<AttachedFile[]>([]);
+  const [dragOver, setDragOver] = useState(false);
 
   useEffect(() => {
     try {
@@ -93,15 +104,29 @@ export default function Home() {
 
   const onlineCount = models.filter((m) => m.available && m.id !== "adelte-local").length;
 
+  async function addFiles(list: FileList | File[]) {
+    const incoming = Array.from(list).slice(0, MAX_CLIENT_FILES - files.length);
+    for (const f of incoming) {
+      try {
+        const text = (await f.text()).slice(0, MAX_CLIENT_CHARS);
+        if (!text.trim()) continue;
+        setFiles((prev) => (prev.length >= MAX_CLIENT_FILES ? prev : [...prev, { name: f.name || "pasted.txt", text }]));
+      } catch {}
+    }
+  }
+
   async function send(text?: string) {
     const message = (text ?? input).trim();
-    if (!message || busy) return;
+    const attached = files;
+    if ((!message && attached.length === 0) || busy) return;
     setInput("");
-    const history = [...msgsRef.current, { role: "user" as const, text: message }]
+    setFiles([]);
+    const label = attached.length > 0 ? " [attached: " + attached.map((f) => f.name).join(", ") + "]" : "";
+    const history = [...msgsRef.current, { role: "user" as const, text: (message || "(see attached files)") + label }]
       .filter((m) => m.role === "user" || m.role === "ai")
       .slice(-10)
       .map((m) => ({ role: m.role, text: m.text }));
-    setMsgs((m) => [...m, { role: "user", text: message }]);
+    setMsgs((m) => [...m, { role: "user", text: (message || "(see attached files)") + label }]);
     setBusy(true);
     const aiIndex = msgsRef.current.length + 1;
     setMsgs((m) => [...m, { role: "ai", text: "" }]);
@@ -111,7 +136,7 @@ export default function Home() {
       const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, history, modelId }),
+        body: JSON.stringify({ message, history, modelId, attachments: attached }),
         signal: ac.signal
       });
       if (!res.ok || !res.body) throw new Error("stream failed");
@@ -257,7 +282,55 @@ export default function Home() {
             {busy && <div className="typing">AdelTe is thinking…</div>}
           </div>
 
-          <div className="composer">
+          {files.length > 0 && (
+            <div className="chips" style={{ marginBottom: 10 }}>
+              {files.map((f) => (
+                <span key={f.name} className="chip" title={`${f.text.length} chars`}>
+                  📎 {f.name}
+                  <button
+                    aria-label={`Remove ${f.name}`}
+                    onClick={() => setFiles((prev) => prev.filter((p) => p.name !== f.name))}
+                    style={{ marginLeft: 8, background: "none", border: "none", color: "inherit", cursor: "pointer" }}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div
+            className="composer"
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files);
+            }}
+            style={dragOver ? { outline: "2px dashed var(--accent)", borderRadius: 12 } : undefined}
+          >
+            <input
+              ref={fileRef}
+              type="file"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files?.length) addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <button
+              className="chip"
+              title="Attach text/code files (drop them here too)"
+              onClick={() => fileRef.current?.click()}
+              style={{ alignSelf: "center", whiteSpace: "nowrap" }}
+            >
+              📎 Attach
+            </button>
             <textarea
               className="input"
               value={input}
@@ -268,9 +341,9 @@ export default function Home() {
                   send();
                 }
               }}
-              placeholder="Ask, paste an error, or describe the task… (Enter to send)"
+              placeholder="Ask, paste an error, attach code/logs, or drop files… (Enter to send)"
             />
-            <button className="btn" disabled={busy || !input.trim()} onClick={() => send()}>
+            <button className="btn" disabled={busy || (!input.trim() && files.length === 0)} onClick={() => send()}>
               Send
             </button>
             {busy && (

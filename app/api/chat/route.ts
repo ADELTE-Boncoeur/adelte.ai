@@ -1,6 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { classifyTask, generateAdelTeReply } from "@/lib/adelte";
 import { getAvailableModels, generateOnlineReply } from "@/lib/models";
+import { sanitizeAttachments, buildContextMessage, attachmentLabel, Attachment } from "@/lib/attachments";
+
+function capNotes(notes: string[]): string {
+  return notes.length > 0 ? "\n\n[" + notes.join(" ") + "]" : "";
+}
+
+function localFileNote(files: Attachment[]): string {
+  if (files.length === 0) return "";
+  return `\n\n[Note: ${files.length} file(s) attached (${files.map((f) => f.name).join(", ")}). The local engine can't deeply analyze file content — switch to an online model for file-aware answers.]`;
+}
 
 interface HistoryItem {
   role?: string;
@@ -13,13 +23,14 @@ export async function POST(req: NextRequest) {
     const message = typeof body.message === "string" ? body.message.slice(0, 4000) : "";
     const rawHistory: HistoryItem[] = Array.isArray(body.history) ? body.history.slice(-10) : [];
     const modelId = typeof body.modelId === "string" ? body.modelId : "adelte-local";
+    const { files, notes } = sanitizeAttachments(body.attachments);
 
-    if (!message.trim()) {
+    if (!message.trim() && files.length === 0) {
       return NextResponse.json({ error: "Empty message" }, { status: 400 });
     }
 
-    // Safety gate runs LOCALLY first, no matter which model is selected.
-    const task = classifyTask(message);
+    // Safety gate runs LOCALLY first, on the message only — never on file content.
+    const task = classifyTask(message || "review the attached files");
 
     if (task.level === 4) {
       const refusal = generateAdelTeReply(message);
@@ -40,26 +51,26 @@ export async function POST(req: NextRequest) {
 
     if (modelId && modelId !== "adelte-local") {
       try {
-        const online = await generateOnlineReply(modelId, history, message);
+        const online = await generateOnlineReply(modelId, history, buildContextMessage(message, files));
         return NextResponse.json({
-          reply: online.text,
+          reply: online.text + capNotes(notes),
           level: task.level,
           levelLabel: task.label,
           playbook: task.playbook ?? null,
           confidence: task.level === 0 ? "High" : "Medium",
           needsConfirmation: task.needsConfirmation,
-          model: online.modelLabel
+          model: online.modelLabel + attachmentLabel(files)
         });
       } catch (err) {
         const fallback = generateAdelTeReply(message);
         return NextResponse.json({
-          reply: fallback.answer,
+          reply: fallback.answer + localFileNote(files) + capNotes(notes),
           level: task.level,
           levelLabel: task.label,
           playbook: task.playbook ?? null,
           confidence: "Low",
           needsConfirmation: task.needsConfirmation,
-          model: "AdelTe Local (fallback)",
+          model: "AdelTe Local (fallback)" + attachmentLabel(files),
           onlineError: err instanceof Error ? err.message : "Online model failed"
         });
       }
@@ -67,7 +78,7 @@ export async function POST(req: NextRequest) {
 
     const result = generateAdelTeReply(message);
     return NextResponse.json({
-      reply: result.answer,
+      reply: result.answer + localFileNote(files) + capNotes(notes),
       level: result.level,
       levelLabel: result.levelLabel,
       playbook: result.playbook ?? null,
