@@ -70,6 +70,11 @@ export default function Home() {
   const msgsRef = useRef<Msg[]>(msgs);
   msgsRef.current = msgs;
   const abortRef = useRef<AbortController | null>(null);
+  const recRef = useRef<{ stop: () => void } | null>(null);
+  const [listening, setListening] = useState(false);
+  const [speechSupported] = useState(
+    () => typeof window !== "undefined" && Boolean((window as unknown as Record<string, unknown>).SpeechRecognition || (window as unknown as Record<string, unknown>).webkitSpeechRecognition)
+  );
   const fileRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<AttachedFile[]>([]);
   const [dragOver, setDragOver] = useState(false);
@@ -119,6 +124,10 @@ export default function Home() {
     const message = (text ?? input).trim();
     const attached = files;
     if ((!message && attached.length === 0) || busy) return;
+    if (listening) {
+      recRef.current?.stop();
+      setListening(false);
+    }
     setInput("");
     setFiles([]);
     const label = attached.length > 0 ? " [attached: " + attached.map((f) => f.name).join(", ") + "]" : "";
@@ -202,6 +211,60 @@ export default function Home() {
     }
   }
 
+  function toggleListen() {
+    if (listening) {
+      recRef.current?.stop();
+      return;
+    }
+    const w = window as unknown as Record<string, unknown>;
+    const SR = (w.SpeechRecognition || w.webkitSpeechRecognition) as (new () => {
+      lang: string;
+      interimResults: boolean;
+      onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript?: string }>> }) => void) | null;
+      onend: (() => void) | null;
+      onerror: (() => void) | null;
+      start: () => void;
+      stop: () => void;
+    }) | undefined;
+    if (!SR) return;
+    const rec = new SR();
+    rec.lang = navigator.language || "en-US";
+    rec.interimResults = false;
+    rec.onresult = (e) => {
+      const text = Array.from(e.results)
+        .map((r) => r[0]?.transcript || "")
+        .join(" ")
+        .trim();
+      if (text) send(text);
+    };
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
+    recRef.current = rec;
+    setListening(true);
+    try {
+      rec.start();
+    } catch {
+      setListening(false);
+    }
+  }
+
+  function exportChat() {
+    const lines = msgs
+      .map((m) =>
+        m.role === "user" ? `**You:** ${m.text}` : `**AdelTe${m.model ? ` (${m.model})` : ""}:** ${m.text}`
+      )
+      .join("\n\n---\n\n");
+    const blob = new Blob([`# AdelTe chat export\n\n${lines}\n`], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "adelte-chat.md";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="shell">
       <div className="topbar">
@@ -254,16 +317,21 @@ export default function Home() {
         <main className="card chat">
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <h3 style={{ margin: 0 }}>Chat</h3>
-            <button
-              className="chip"
-              disabled={busy}
-              onClick={() => {
-                abortRef.current?.abort();
-                setMsgs([GREETING]);
-              }}
-            >
-              Clear chat
-            </button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="chip" onClick={exportChat} title="Download this chat as Markdown">
+                Export
+              </button>
+              <button
+                className="chip"
+                disabled={busy}
+                onClick={() => {
+                  abortRef.current?.abort();
+                  setMsgs([GREETING]);
+                }}
+              >
+                Clear chat
+              </button>
+            </div>
           </div>
           <div className="msgs" ref={boxRef}>
             {msgs.map((m, i) => (
@@ -331,6 +399,20 @@ export default function Home() {
             >
               📎 Attach
             </button>
+            {speechSupported && (
+              <button
+                className="chip"
+                title={listening ? "Stop dictation" : "Dictate with microphone"}
+                onClick={toggleListen}
+                style={{
+                  alignSelf: "center",
+                  whiteSpace: "nowrap",
+                  borderColor: listening ? "#f87171" : undefined
+                }}
+              >
+                {listening ? "⏹ Listening…" : "🎤 Speak"}
+              </button>
+            )}
             <textarea
               className="input"
               value={input}
